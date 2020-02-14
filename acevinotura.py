@@ -2,6 +2,7 @@ import argparse
 import cv2
 import os
 import sys
+from tqdm import tqdm
 from openvino.inference_engine import IENetwork, IECore, np
 
 MODEL = "models/frozen_inference_graph.xml"
@@ -123,6 +124,7 @@ def infer_on_video(args):
 
     # Get and open video capture
     cap = cv2.VideoCapture(args.i)
+    vid_length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.open(args.i)
 
     # Grab the shape of the input
@@ -136,10 +138,12 @@ def infer_on_video(args):
     print("Writing output to ", output_file)
     out = cv2.VideoWriter(output_file, 0x7634706d, 30, (width,height))
 
-    # Process frames until the video ends, or process is exited
-    frame_count = 0;
+    # init progress bar
+    pbar = tqdm(total=vid_length)
 
+    # Process frames until the video ends, or process is exited
     while cap.isOpened():
+        pbar.update(1)
         # Read the next frame
         flag, frame = cap.read()
         if not flag:
@@ -163,9 +167,6 @@ def infer_on_video(args):
 
         # Write out the frame in the video
         out.write(frame)
-
-        # frame count
-        frame_count = frame_count + 1
 
         # Break if escape key pressed
         if key_pressed == 27:
