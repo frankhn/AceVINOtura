@@ -24,7 +24,7 @@ Firstly you'll need to clone the repo down to you local machine.
 
 Once you have the project.
 
-``` python acevinotura.py -i videos\vid7.mp4 -z "TODO" ```
+``` python acevinotura.py -i videos\vid7.mp4 -z "[[0, 100], [470, 160], [260, 350], [0, 290]]" ```
 
 ## Licence
 
