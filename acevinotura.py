@@ -4,8 +4,8 @@ import json
 import cv2
 import os
 import sys
-from tqdm import tqdm
 from openvino.inference_engine import IENetwork, IECore, np
+from datetime import datetime
 
 MODEL = "models/frozen_inference_graph.xml"
 LINUX_CPU_EXTENSION = "/opt/intel/openvino/deployment_tools/inference_engine/lib/intel64/libcpu_extension_avx2.so"
@@ -42,6 +42,7 @@ def get_args():
     d_desc = "The device name, if not 'CPU'"
     s_desc = "Show forbidden zone in output, True or False"
     c_desc = "The path to the CPU extension, if not found"
+    o_desc = "The path to output directory"
 
     parser._action_groups.pop()
     required = parser.add_argument_group('required arguments')
@@ -52,9 +53,12 @@ def get_args():
     optional.add_argument("-i", help=i_desc)
     optional.add_argument("-d", help=d_desc, default='CPU')
     optional.add_argument("-s", help=s_desc, default=False)
-    optional.add_argument("-c", help=c_desc, default=get_cpu_extension())
+    optional.add_argument("-c", help=c_desc)
+    optional.add_argument("-o", help=o_desc)
     args = parser.parse_args()
 
+    if args.o != None and not os.path.isdir(args.o):
+        os.mkdir(args.o)
     return args
 
 def preprocessing(input_image, height, width):
@@ -92,6 +96,7 @@ def create_output_image(image, output, forbidden_zone, width, height):
     # (x_min, y_min) - coordinates of the top left bounding box corner
     # (x_max, y_max) - coordinates of the bottom right bounding box corner.
     thickness = 1 # in pixels
+    is_bad_cat_detected = False
     for bounding_box in output[0][0]:
         conf = bounding_box[2]
         if conf >= CONFIDENCE and CAT_IDX == int(bounding_box[1]):
@@ -104,12 +109,14 @@ def create_output_image(image, output, forbidden_zone, width, height):
             # choose color : red if center inside forbidden zone, green if outside
             color = (0, 255, 0)  # green
             label = 'good cat'
+            #print('Cat detected', datetime.now().strftime("%Y%m%d-%H%M%S"))
             if cv2.pointPolygonTest(forbidden_zone, center, False) > 0:
                 color = (0, 0, 255) #red
                 label = 'bad cat'
+                is_bad_cat_detected = True
             cv2.rectangle(image, (x_min, y_min), (x_max, y_max), color, thickness)
             image = add_text_to_bounding_box(image, label, x_min, y_min, color)
-    return image
+    return image, is_bad_cat_detected
 
 def infer_on_video(args):
     '''
@@ -122,6 +129,7 @@ def infer_on_video(args):
     if len(forbidden_zone) < 3: # a polygon should have at least 3 sides
         sys.exit('Error : forbidden zone format should be like "[[x1,y1],[x2,y2],[x3,y3]]"')
 
+    out = None
     # Test the "-i" argument
     is_reading_from_file = (args.i != None)
     if is_reading_from_file:
@@ -138,6 +146,8 @@ def infer_on_video(args):
         # The second argument should be `cv2.VideoWriter_fourcc('M','J','P','G')` on Mac, and `0x00000021` on Linux
         # fourcc = cv2.VideoWriter_fourcc(*'x264')
         output_file = "output-" + str(args.i.rsplit(os.path.sep, 1)[-1])
+        if args.o != None:
+            output_file = args.o + os.path.sep + output_file
         print("Writing output to ", output_file)
         out = cv2.VideoWriter(output_file, 0x7634706d, 30, (width, height))
     else:
@@ -145,6 +155,8 @@ def infer_on_video(args):
         import imutils
         from imutils.video import VideoStream
         cap = VideoStream(usePiCamera=True).start()
+        width = INPUT_PICAM_WIDTH
+        height = INPUT_PICAM_HEIGHT
         time.sleep(2.0)
 
     is_drawing_forbidden_zone = (args.s == 'True')
@@ -154,7 +166,10 @@ def infer_on_video(args):
     ### Load the network model into the IE
     print("Load the network model into the IE")
     plugin = IECore()
-    plugin.add_extension(args.c, args.d)
+    if args.d == 'CPU':
+        if args.c == None:
+            args.c = get_cpu_extension()
+        plugin.add_extension(args.c, args.d)
     network = IENetwork(model=MODEL, weights=os.path.splitext(MODEL)[0] + ".bin")
     exec_network = plugin.load_network(network, args.d)
     input_blob = next(iter(network.inputs))
@@ -162,11 +177,15 @@ def infer_on_video(args):
 
     # If reading from file, init progress bar
     if is_reading_from_file:
+        from tqdm import tqdm
         pbar = tqdm(total=vid_length)
+    else:
+        print("Watching the forbidden zone...")
+        if args.o != None:
+            print("Writing output to directory", args.o)
 
     # Process frames until the video ends (if reading a file), or process is exited
     while not is_reading_from_file or cap.isOpened():
-
         if is_reading_from_file:
             pbar.update(1)
             flag, frame = cap.read()
@@ -188,19 +207,29 @@ def infer_on_video(args):
             # Show the forbidden zone if -s argument is True
             if is_drawing_forbidden_zone:
                 cv2.polylines(frame, [forbidden_zone], True, (255, 0, 0))
-            frame = create_output_image(frame, output['DetectionOutput'], forbidden_zone, width, height)
+            frame, is_bad_cat_detected = create_output_image(frame, output['DetectionOutput'], forbidden_zone, width, height)
+
+        # If watching live
+        if not is_reading_from_file and is_bad_cat_detected:
+            output_file = "frame" + datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + ".jpg"
+            if args.o != None:
+                output_file = args.o + os.path.sep + output_file
+            cv2.imwrite(output_file, frame)
 
         # Write out the frame in the video
-        out.write(frame)
+        if out != None:
+            out.write(frame)
 
         # Break if escape key pressed
         if key_pressed == 27:
             break
 
     # Release the out writer, capture, and destroy any OpenCV windows
-    out.release()
-    cap.release()
-    cv2.destroyAllWindows()
+    print("Release...")
+    if is_reading_from_file:
+        cap.release()
+    if out != None:
+        out.release()
 
 def main():
     print("Starting")
